@@ -1,62 +1,195 @@
-import io.appium.java_client.AppiumDriver;
-import org.openqa.selenium.remote.DesiredCapabilities;
+import io.appium.java_client.android.Activity;
+import io.appium.java_client.android.AndroidDriver;
+import io.appium.java_client.android.AndroidElement;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.xml.sax.SAXException;
+import utils.Constants;
+import utils.DocumentUtil;
+import utils.LogUtil;
 
-import java.io.File;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.HashMap;
+import javax.xml.xpath.XPathExpressionException;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 public class App {
     public static void main(String[] args) {
         System.out.println("hello world");
     }
 
-    private HashMap<String, String> getAppInfo() {
-        HashMap<String, String> appInfo = new HashMap<>();
 
-        return appInfo;
+    private LogUtil logger = LogUtil.getLogger(App.class);
+    private final boolean DEBUG = true;
+
+    private ElementInActivity clickedElement = new ElementInActivity();
+    private Set<String> visitedActivities = new HashSet<>();
+    private String page = "";
+
+
+
+    /*
+    点击后的等待时间
+     */
+    private final int CLICK_WAIT_TIME = 1500;
+
+    private final String EDIT_TEXT = "EditText";
+
+
+    public void test(AndroidDriver<AndroidElement> driver) {
+        testWithTree(driver);
     }
 
-    private AppiumDriver initAppiumDrier(String appPath, String udid, int port, int timeout) {
-        AppiumDriver driver = null;
 
-        // app读取
-        File app = new File(appPath);
+    public void testWithTree(AndroidDriver<AndroidElement> driver) {
+        config(driver);
+        String homeActivity = driver.currentActivity();
+        String homePackage = driver.getCurrentPackage();
+        visitedActivities.add(homeActivity);
 
-        DesiredCapabilities capabilities = new DesiredCapabilities();
-        capabilities.setCapability("browserName", "");
-        capabilities.setCapability("platformName", "Android");
-        capabilities.setCapability("deviceName", "Android Emulator");
-        // udid
-        capabilities.setCapability("udid", udid);
+        while (true) {
+            String pageSource = driver.getPageSource();
+            pageChanged(pageSource);
+            Document document = DocumentUtil.buildDocument(pageSource);
+            Element node = document.getDocumentElement();
+            boolean completed = travelDFS(node.getFirstChild(), driver);
+            logger.info("complete dfs", String.valueOf(completed));
+            if (completed) {
+                if (!homeActivity.equals(driver.currentActivity())) {
+                    driver.navigate().back();
+                }
+            }
+            if (!driver.getCurrentPackage().equals(homePackage)) {
+                logger.info("跳出app了");
+                driver.startActivity(new Activity(homePackage, homeActivity));
+            }
+        }
+    }
 
-        //设置apk
-        capabilities.setCapability("app", app.getAbsolutePath());
-        // TODO 如何自动获取到，apk的package和activity
-        capabilities.setCapability("appPackage", "name.gudong.translate");
-        capabilities.setCapability("appActivity", "name.gudong.translate.ui.activitys.MainActivity");
+
+    public boolean travelDFS(Node node, AndroidDriver<AndroidElement> driver) {
+        while (node != null) {
+
+            boolean completed = travelDFS(node.getFirstChild(), driver);
+            if (!completed) return false;
 
 
-        /**
-         * 其他配置
-          */
-        capabilities.setCapability("noSign", "true");
-        //设置使用unicode键盘，支持输入中文和特殊字符
-        capabilities.setCapability("unicodeKeyboard", "true");
-        //设置用例执行完成后重置键盘
-        capabilities.setCapability("resetKeyboard", "true");
-        // 权限问题
-        capabilities.setCapability("autoGrantPermissions", "true");
+            String nodeXPath = DocumentUtil.getNodeXPath(node);
+            logger.info("xpath", nodeXPath);
 
-        //初始化
+
+            // 是可输入的？
+            if (canInput(node)) {
+                try {
+                    driver.findElementByXPath(nodeXPath).sendKeys("test");
+                } catch (Exception e) {}
+            }
+
+            // 是可点的？
+            if (!canClick(node)) {
+                node = node.getNextSibling();
+                continue;
+            }
+
+
+            // 点过了？
+            if (clickedElement.contains(driver.currentActivity(), nodeXPath)) {
+                logger.info("点过了");
+                node = node.getNextSibling();
+                continue;
+            }
+            try {
+                logger.info("加入已点击");
+                clickedElement.add(driver.currentActivity(), nodeXPath);
+
+                AndroidElement element = driver.findElementByXPath(nodeXPath);
+                String currentActivity = driver.currentActivity();
+                element.click();
+                // 等待程序响应变化
+                Thread.sleep(CLICK_WAIT_TIME);
+
+                if (!currentActivity.equals(driver.currentActivity())) {
+                    if (!this.visitedActivities.add(driver.currentActivity())) {
+                        logger.info("该活动已经跳转来过");
+                        driver.navigate().back();
+                        return false;
+                    }
+                }
+
+                boolean changed = this.pageChanged(driver.getPageSource());
+                if (changed) {
+                    logger.info("page changed");
+                    return false;
+                }
+            } catch (Exception e) {
+//                e.printStackTrace();
+            }
+            node = node.getNextSibling();
+        }
+        return true;
+    }
+
+
+    public boolean pageChanged(String xml) {
         try {
-            driver = new AppiumDriver(new URL("http://127.0.0.1:" + port + "/wd/hub"), capabilities);
-        } catch (MalformedURLException e) {
+            String structure = DocumentUtil.getPageStructure(xml);
+            String old = page;
+            page = structure;
+            logger.info(structure);
+            return !old.equals(page);
+        } catch (IOException | SAXException | XPathExpressionException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+    
+    
+    public boolean canClick(Node node) {
+        if (node.hasAttributes()) {
+            NamedNodeMap attributes = node.getAttributes();
+
+            Node clickable = attributes.getNamedItem("clickable");
+            if (clickable != null && !Boolean.valueOf(clickable.getNodeValue())) {
+                return false;
+            }
+            Node content = attributes.getNamedItem("content-desc");
+            if (content != null && content.getNodeValue().equals(Constants.NAVIGATOR_NAME)) {
+                return false;
+            }
+
+            // 根据位置和类判断是不是导航按钮
+            Node classAttr = attributes.getNamedItem("class");
+            Node boundsAttr = attributes.getNamedItem("bounds");
+            if (classAttr != null
+                && classAttr.getNodeValue().contains("ImageButton")
+                && boundsAttr != null
+                && boundsAttr.getNodeValue().contains("[0,48]")) {
+                logger.info("导航按钮");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean canInput(Node node) {
+        return node.getNodeName().contains(EDIT_TEXT);
+    }
+
+    /**
+     * 一些其他配置，像定位时长等
+     * @param driver
+     */
+    private void config(AndroidDriver driver) {
+        assert driver != null;
+        try {
+            Thread.sleep(6000);        //等待6s，待应用完全启动
+        } catch (InterruptedException e) {
             // TODO Auto-generated catch block
             e.printStackTrace();
         }
-
-        return driver;
-
+        driver.manage().timeouts().implicitlyWait(8, TimeUnit.SECONDS); //设置尝试定位控件的最长时间为8s,也就是最多尝试8s
     }
 }
